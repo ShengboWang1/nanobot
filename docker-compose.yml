@@ -3,7 +3,7 @@ x-common-config: &common-config
     context: .
     dockerfile: Dockerfile
   volumes:
-    - ~/.nanobot:/home/nanobot/.nanobot
+    - ./data:/home/nanobot/.nanobot
   cap_drop:
     - ALL
   cap_add:
@@ -14,10 +14,12 @@ x-common-config: &common-config
 
 services:
   nanobot-gateway:
-    container_name: nanobot-gateway
+    container_name: pai-nanobot-gateway
     <<: *common-config
     command: ["gateway"]
     restart: unless-stopped
+    environment:
+      - WS_TOKEN=${WS_TOKEN}
     ports:
       - 18790:18790
       - 8765:8765
@@ -31,7 +33,7 @@ services:
           memory: 256M
 
   nanobot-api:
-    container_name: nanobot-api
+    container_name: pai-nanobot-api
     <<: *common-config
     command:
       ["serve", "--host", "0.0.0.0", "-w", "/home/nanobot/.nanobot/api-workspace"]

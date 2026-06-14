@@ -1,40 +1,51 @@
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+# ---- Build args for local development with domestic mirrors ----
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG PY_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG NODE_IMAGE=node:20-slim
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-# Install Node.js 20 for the WhatsApp bridge
+# ---- Stage 1: WebUI build ----
+FROM ${NODE_IMAGE} AS webui-builder
+
+ARG NPM_REGISTRY
+WORKDIR /app
+COPY webui/ webui/
+RUN cd webui && npm ci --registry=${NPM_REGISTRY} && npm run build
+# output lands at /app/nanobot/web/dist (vite outDir: ../nanobot/web/dist)
+
+
+# ---- Stage 2: Python runtime ----
+FROM ${UV_IMAGE}
+
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates gnupg git bubblewrap openssh-client && \
-    mkdir -p /etc/apt/keyrings && \
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends nodejs && \
-    apt-get purge -y gnupg && \
-    apt-get autoremove -y && \
+    apt-get install -y --no-install-recommends curl ca-certificates git bubblewrap openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python dependencies first (cached layer). Hatch reads the custom build
-# hook from hatch_build.py even for this metadata-only install.
+ARG PY_INDEX
+# Install Python dependencies first for layer caching.
+# bridge/ and webui/ are absent at this point; stub them out so hatch
+# force-include and the webui build hook don't fail.
 COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
-RUN mkdir -p nanobot bridge && touch nanobot/__init__.py && \
-    uv pip install --system --no-cache . && \
+RUN mkdir -p bridge nanobot/web/dist && touch nanobot/__init__.py && \
+    NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache --index-url ${PY_INDEX} . && \
     rm -rf nanobot bridge
 
-# Copy the full source and install
+# Copy Python source
 COPY nanobot/ nanobot/
-COPY bridge/ bridge/
-COPY webui/ webui/
-RUN NANOBOT_FORCE_WEBUI_BUILD=1 uv pip install --system --no-cache .
 
-# Build the WhatsApp bridge
-WORKDIR /app/bridge
-RUN git config --global --add url."https://github.com/".insteadOf ssh://git@github.com/ && \
-    git config --global --add url."https://github.com/".insteadOf git@github.com: && \
-    npm install && npm run build
-WORKDIR /app
+# Copy pre-built WebUI from Stage 1 (index.html present → hatch skips rebuild)
+COPY --from=webui-builder /app/nanobot/web/dist/ nanobot/web/dist/
 
-# Create non-root user and config directory
+# bridge/ was removed in the dep-cache layer; recreate empty stub so hatch
+# force-include doesn't error (we don't ship the WhatsApp bridge)
+RUN mkdir -p bridge
+
+# Final install picks up the actual Python source; webui already built so skips
+RUN uv pip install --system --no-cache --index-url ${PY_INDEX} .
+
+# Create non-root user
 RUN useradd -m -u 1000 -s /bin/bash nanobot && \
     mkdir -p /home/nanobot/.nanobot && \
     chown -R nanobot:nanobot /home/nanobot /app
@@ -45,8 +56,10 @@ RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/ent
 USER nanobot
 ENV HOME=/home/nanobot
 
-# Gateway health endpoint and optional WebUI/WebSocket channel ports
-EXPOSE 18790 8765
+# 18790: gateway HTTP (health + API)
+# 8765:  WebUI / WebSocket channel
+# 8900:  OpenAI-compatible API server
+EXPOSE 18790 8765 8900
 
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["status"]

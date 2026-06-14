@@ -91,6 +91,9 @@ nano.*.save
 .env.*
 !.env.example
 
+# Runtime data (config with API keys, sessions, workspace)
+data/
+
 # Logs & temp
 *.log
 logs/
